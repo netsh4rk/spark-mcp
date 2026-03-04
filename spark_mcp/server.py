@@ -28,7 +28,9 @@ TOOLS: list[Tool] = [
         inputSchema={
             "type": "object",
             "properties": {
-                "limit": {"type": "number", "description": "Max results", "default": 20}
+                "limit": {"type": "number", "description": "Max results", "default": 20},
+                "before": {"type": "string", "description": "Return transcripts with meetingStartDate before this ISO datetime (e.g., '2026-01-30T16:00:00')"},
+                "after": {"type": "string", "description": "Return transcripts with meetingStartDate after this ISO datetime (e.g., '2026-01-30T13:00:00')"}
             }
         }
     ),
@@ -448,6 +450,8 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
         if name == "list_meeting_transcripts":
             result = db.list_transcripts(
                 limit=int(arguments.get("limit", 20)),
+                start_date=arguments.get("after"),  # after maps to start_date
+                end_date=arguments.get("before"),   # before maps to end_date
                 only_kept=True
             )
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
