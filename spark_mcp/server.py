@@ -454,5 +454,10 @@ async def main():
         )
 
 
-if __name__ == "__main__":
+def cli() -> None:
+    """Sync entry point so the `spark-mcp` console script actually runs."""
     asyncio.run(main())
+
+
+if __name__ == "__main__":
+    cli()

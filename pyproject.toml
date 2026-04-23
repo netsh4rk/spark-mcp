@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spark-mcp-server"
-version = "1.4.0"
+version = "1.4.1"
 description = "MCP server for accessing Spark Desktop meeting transcripts, emails, and calendar (read-only)"
 requires-python = ">=3.10"
 # Dependencies are pinned exactly. pypdf / python-docx / openpyxl parse
@@ -19,4 +19,4 @@ dependencies = [
 ]
 
 [project.scripts]
-spark-mcp = "spark_mcp.server:main"
+spark-mcp = "spark_mcp.server:cli"
