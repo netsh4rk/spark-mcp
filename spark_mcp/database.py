@@ -119,6 +119,11 @@ class SparkDatabase:
             data = json.loads(additional_info)
         except (json.JSONDecodeError, TypeError):
             return None
+        # Guard against top-level JSON that is a list/str/number rather than
+        # an object — calling ``.get`` on those would raise AttributeError
+        # and turn a missing field into a server error.
+        if not isinstance(data, dict):
+            return None
         value = data.get("accountAddress")
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -595,11 +600,11 @@ class SparkDatabase:
             Dict with 'emails' list and 'total' count. Each email includes a
             ``category`` label derived from ``messages.category``.
         """
-        conn = self._connect_messages()
-
-        where_clauses = []
-        params = []
-
+        # Validate category labels BEFORE touching the DB so callers that
+        # pass typos get a fast, deterministic ValueError regardless of
+        # database state. Also lets the unit tests exercise this path
+        # without a real Spark install.
+        category_ids: List[int] = []
         if categories:
             try:
                 category_ids = [self._CATEGORY_IDS[c] for c in categories]
@@ -608,6 +613,13 @@ class SparkDatabase:
                     f"Unknown category {exc.args[0]!r}. "
                     f"Expected any of: {sorted(self._CATEGORY_IDS)}"
                 ) from None
+
+        conn = self._connect_messages()
+
+        where_clauses = []
+        params = []
+
+        if category_ids:
             placeholders = ",".join("?" * len(category_ids))
             where_clauses.append(f"category IN ({placeholders})")
             params.extend(category_ids)

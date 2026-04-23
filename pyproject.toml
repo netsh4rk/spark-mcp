@@ -18,5 +18,14 @@ dependencies = [
     "openpyxl==3.1.5",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest==8.3.4",
+]
+
 [project.scripts]
 spark-mcp = "spark_mcp.server:cli"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
