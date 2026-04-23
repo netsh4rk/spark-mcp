@@ -1,2 +1,0 @@
-[console_scripts]
-spark-mcp = spark_mcp.server:main

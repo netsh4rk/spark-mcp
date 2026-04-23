@@ -1,21 +1,23 @@
 # Spark MCP Server
 
-MCP server for accessing Spark Desktop meeting transcripts and emails through the Model Context Protocol.
+MCP server for accessing Spark Desktop transcripts, emails, and calendar through the Model Context Protocol.
+
+> **Fork notice.** This is a security-hardened fork of [feamster/spark-mcp](https://github.com/feamster/spark-mcp) with **all PDF write-tools removed**. The upstream exposes 25 tools including 11 that fill, sign, annotate and template PDFs on the user's filesystem; those tools were found to have no sandboxing (arbitrary read/write paths) and no defence against confused-deputy / prompt-injection from email content. This fork keeps only the read-only surface for transcripts, emails, calendar and attachment inspection.
 
 ## Features
 
 - 📝 Access all meeting transcripts (calendar-based and ad-hoc)
-- 🔍 Full-text search across transcript content
-- 📊 Statistics and analytics about your transcripts
-- 🔒 Read-only access - safe and non-destructive
+- ✉️ Browse and search emails (SQLite FTS5)
+- 📅 Read calendar events
+- 📎 Inspect email attachments (with text extraction for PDF / DOCX / XLSX)
+- 🔍 Full-text search across transcripts and email bodies
+- 🔒 Read-only: the server performs **no** writes to your filesystem or to Spark's databases
 - ⚡ Fast local SQLite queries - no network required
-- 🎯 Captures ad-hoc meetings (primary use case)
 
 ## Requirements
 
-- macOS (Spark Desktop must be installed)
+- macOS (Spark Desktop App Store version)
 - Python 3.10+
-- Spark Desktop for macOS (App Store version)
 
 ## Installation
 
@@ -28,15 +30,15 @@ pip install -e .
 
 ### With Claude Desktop
 
-Add to your Claude Desktop MCP settings (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
     "spark": {
-      "command": "python",
+      "command": "python3",
       "args": ["-m", "spark_mcp.server"],
-      "cwd": "/Users/feamster/src/spark-mcp"
+      "cwd": "/absolute/path/to/spark-mcp"
     }
   }
 }
@@ -59,236 +61,80 @@ Restart Claude Desktop, and the tools will be available.
 ### Standalone Testing
 
 ```bash
-# Run the server (communicates via stdio)
-python -m spark_mcp.server
+python -m spark_mcp.server     # stdio MCP server
+python test_server.py          # smoke-test DB connection
+python verify_all_tools.py     # exercise each DB helper
 ```
 
 ## Available Tools
 
-### 1. `list_meeting_transcripts`
+All tools are read-only.
 
-List meeting transcripts with metadata.
+### Transcripts
+- `list_meeting_transcripts` — list recent transcripts (supports `before` / `after` ISO filters)
+- `get_meeting_transcript` — fetch full transcript by `messagePk`
+- `search_meeting_transcripts` — FTS5 search over transcript text
+- `get_transcript_statistics` — totals, date range, top senders
 
-**Parameters:**
-- `limit` (optional, default: 20): Max results
-- `after` (optional): Return transcripts with meetingStartDate after this ISO datetime (e.g., '2026-01-30T13:00:00')
-- `before` (optional): Return transcripts with meetingStartDate before this ISO datetime (e.g., '2026-01-30T16:00:00')
+### Emails
+- `list_emails` — browse `inbox` / `sent` / `all` with optional `sender` filter
+- `search_emails` — FTS5 search over email bodies, optional `sender`, date range, and `sort_by`
+- `get_email` — full email by `messagePk`
+- `find_action_items` — emails containing todos (last N days)
+- `find_pending_responses` — emails likely needing a reply (last N days)
 
-**Example:**
-```json
-{
-  "after": "2026-02-09T09:00:00",
-  "before": "2026-02-09T12:00:00",
-  "limit": 10
-}
-```
+### Calendar
+- `list_events` — upcoming events (`daysAhead`)
+- `get_event_details` — event by `eventPk`
+- `find_events_needing_prep` — events in next `hoursAhead` that may need prep
 
-**Returns:**
-```json
-{
-  "transcripts": [
-    {
-      "messagePk": 63336,
-      "subject": "Prior Art Review for Patent Claims 416 and 571",
-      "sender": "example@example.com",
-      "receivedDate": "2025-11-11 15:59:12",
-      "meetingStartDate": "2025-11-11T15:00:00.000Z",
-      "meetingEndDate": "2025-11-11T16:00:00.000Z",
-      "transcriptId": "-8929133086933914113",
-      "isCalendarEvent": false,
-      "eventSummary": null,
-      "textLength": 29893,
-      "hasFullText": true
-    }
-  ],
-  "total": 228
-}
-```
+### Combined intelligence
+- `get_daily_briefing` — today's summary across transcripts / emails / calendar
+- `find_context_for_meeting` — emails related to an event
 
-### 2. `get_meeting_transcript`
-
-Get full transcript content.
-
-**Parameters:**
-- `messagePk` (optional): Message primary key from list
-- `transcriptId` (optional): Transcript ID (mtid)
-
-**Example:**
-```json
-{
-  "messagePk": 63336
-}
-```
-
-**Returns:**
-```json
-{
-  "messagePk": 63336,
-  "subject": "Prior Art Review for Patent Claims 416 and 571",
-  "sender": "example@example.com",
-  "recipients": "recipient@example.com",
-  "receivedDate": "2025-11-11 15:59:12",
-  "meetingStartDate": "2025-11-11T15:00:00.000Z",
-  "meetingEndDate": "2025-11-11T16:00:00.000Z",
-  "transcriptId": "-8929133086933914113",
-  "fullText": "the meeting focused on reviewing prior art for patent claims...",
-  "metadata": {
-    "language": "auto",
-    "status": true,
-    "autoProcessed": true,
-    "isKept": true,
-    "eventSummary": null
-  }
-}
-```
-
-### 3. `search_meeting_transcripts`
-
-Full-text search across transcripts.
-
-**Parameters:**
-- `query` (required): Search query (FTS5 syntax supported)
-- `startDate` (optional): Filter after this date
-- `endDate` (optional): Filter before this date
-- `limit` (optional, default: 20): Max results
-- `includeContext` (optional, default: true): Include highlighted excerpts
-
-**Example:**
-```json
-{
-  "query": "neural network AND security",
-  "limit": 5
-}
-```
-
-**FTS5 Query Syntax:**
-- `word1 AND word2` - Both words must be present
-- `word1 OR word2` - Either word present
-- `NOT word` - Exclude word
-- `"exact phrase"` - Exact phrase match
-- `word*` - Prefix match
-
-**Returns:**
-```json
-{
-  "results": [
-    {
-      "messagePk": 62642,
-      "subject": "Meeting Summary",
-      "sender": "example@example.com",
-      "receivedDate": "2025-11-10 23:04:38",
-      "excerpt": "...discussing <mark>neural network</mark> architectures for <mark>security</mark> applications...",
-      "relevanceScore": 1.5
-    }
-  ],
-  "total": 5
-}
-```
-
-### 4. `get_transcript_statistics`
-
-Get overview statistics.
-
-**Parameters:** None
-
-**Returns:**
-```json
-{
-  "totalTranscripts": 233,
-  "calendarMeetings": 37,
-  "adHocMeetings": 196,
-  "keptTranscripts": 228,
-  "deletedTranscripts": 5,
-  "withFullText": 225,
-  "dateRange": {
-    "earliest": "2024-09-01 10:00:00",
-    "latest": "2025-11-11 15:59:12"
-  },
-  "topSenders": [
-    {
-      "email": "colleague@example.com",
-      "count": 45
-    }
-  ]
-}
-```
+### Attachments
+- `list_attachments` — attachments for a given email
+- `get_attachment` — attachment bytes, with optional text extraction for PDF / DOCX / XLSX (delegated to `pypdf`, `python-docx`, `openpyxl`)
+- `search_attachments` — find emails by attachment filename / MIME type
 
 ## Data Sources
 
-### Databases Used
+1. **`messages.sqlite`** — message / transcript metadata
+   `~/Library/Containers/com.readdle.SparkDesktop.appstore/Data/Library/Application Support/Spark Desktop/core-data/messages.sqlite`
+2. **`search_fts5.sqlite`** — full-text index for transcripts and email bodies
+   `~/Library/Containers/com.readdle.SparkDesktop.appstore/Data/Library/Application Support/Spark Desktop/core-data/search_fts5.sqlite`
 
-1. **`messages.sqlite`** - Transcript metadata
-   - Location: `~/Library/Containers/com.readdle.SparkDesktop.appstore/Data/Library/Application Support/Spark Desktop/core-data/messages.sqlite`
-   - Tables: `messages`, `meetTranscriptEvent`
-   - Size: ~178 MB
+Both are opened in `mode=ro` with `PRAGMA query_only = ON`. All queries are parameterised.
 
-2. **`search_fts5.sqlite`** - Full transcript text
-   - Location: `~/Library/Containers/com.readdle.SparkDesktop.appstore/Data/Library/Application Support/Spark Desktop/core-data/search_fts5.sqlite`
-   - Table: `messagesfts` (FTS5 full-text index)
-   - Size: ~232 MB
+## Security notes
 
-### Transcript Types
+This fork removes the PDF write surface, but two residual risks remain; know them before wiring this MCP into an agent:
 
-**Calendar-Based Meetings (37 transcripts):**
-- Scheduled meetings with calendar event info
-- Stored in `meetTranscriptEvent` table
-- Have `eventSummary` field
+1. **Untrusted content in LLM context.** Emails, transcripts, subject lines and attachment filenames are attacker-controlled (anyone can send you an email). Do not auto-execute instructions that appear inside email bodies or attachment text. Keep the agent in a review-before-act posture for anything triggered by this data.
+2. **Attachment parsers.** `pypdf`, `python-docx`, `openpyxl` have had parsing CVEs in the past. Pin versions at install time and keep them updated. Prefer `get_attachment(extractText=false)` for attachments from unknown senders.
 
-**Ad-Hoc Meetings (196 transcripts):**
-- User-initiated transcriptions
-- Not linked to calendar events
-- This is the primary use case for most users
-
-**Total: 228 kept transcripts** (233 including deleted)
-
-## Safety Features
-
-- ✅ Read-only database access
-- ✅ No writes or modifications
-- ✅ Graceful handling of schema changes
-- ✅ Safe concurrent access with Spark
+Path-traversal hardening of `_get_attachment_path` in `database.py` is planned as a follow-up patch.
 
 ## Troubleshooting
 
-### "Failed to connect to Spark databases"
+**"Failed to connect to Spark databases"**
+Verify Spark Desktop (App Store build) is installed and the paths above exist.
 
-1. Verify Spark Desktop is installed (App Store version)
-2. Check database paths exist:
-```bash
-ls -la ~/Library/Containers/com.readdle.SparkDesktop.appstore/Data/Library/Application\ Support/Spark\ Desktop/core-data/
-```
+**No transcripts found**
+Check that transcripts are marked "kept" (not deleted). Run `get_transcript_statistics` to confirm counts.
 
-### No transcripts found
-
-- Make sure you have meeting transcripts in Spark
-- Check that transcripts are marked as "kept" (not deleted)
-- Try running `get_transcript_statistics` to see counts
-
-### Empty transcript text
-
-Some transcripts may not have full text cached locally:
-- Recent transcripts may still be syncing
-- Deleted transcripts have no content
-- Check `hasFullText` field in list results
+**Empty transcript text**
+Recent transcripts may still be syncing. Check `hasFullText` in list results.
 
 ## Development
 
 ```bash
-# Install in development mode
 pip install -e .
-
-# Run tests (if you add them)
-pytest
+pytest   # if/when tests land
 ```
 
-## Future Enhancements
-
-See `PLAN.md` for detailed roadmap, including:
-- General email search and processing
-- Alternative data access methods (API, IMAP)
-- Additional analytics and insights
-- Export capabilities
+See `PLAN.md` for the original upstream design notes.
 
 ## License
 
-MIT
+MIT (inherited from upstream `feamster/spark-mcp`).

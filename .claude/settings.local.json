@@ -10,7 +10,6 @@
       "Bash(timeout 3 python3:*)",
       "Bash(git add:*)",
       "WebFetch(domain:pypdf.readthedocs.io)",
-      "WebFetch(domain:pymupdf.readthedocs.io)",
       "WebSearch",
       "Bash(git commit:*)",
       "Bash(git push)",
