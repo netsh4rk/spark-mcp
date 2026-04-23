@@ -96,6 +96,14 @@ This tool is more reliable than search_emails for finding threads by corresponde
                 "after": {"type": "string", "description": "ISO datetime (e.g. '2026-04-23T08:00:00'). Only emails received at/after this instant."},
                 "before": {"type": "string", "description": "ISO datetime. Only emails received at/before this instant."},
                 "accountPk": {"type": "number", "description": "Spark accountPk to restrict to a single mailbox (see list_accounts)"},
+                "categories": {
+                    "type": "array",
+                    "description": "Restrict to Spark smart-folder categories. E.g. ['priority','other'] to ingest human mail while skipping newsletters and service notifications. Omit for all categories. Derived from Spark's internal classifier — counts can differ ~15% from the Spark sidebar because Spark applies extra UI-side filtering we don't replicate.",
+                    "items": {
+                        "type": "string",
+                        "enum": ["priority", "notifications", "newsletter", "other", "uncategorized"]
+                    }
+                },
                 "limit": {"type": "number", "description": "Max results", "default": 20}
             }
         }
@@ -311,6 +319,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
         # EMAIL TOOLS
         elif name == "list_emails":
             account_pk = arguments.get("accountPk")
+            categories = arguments.get("categories")
             result = db.list_emails(
                 folder=arguments.get("folder", "inbox"),
                 sender=arguments.get("sender"),
@@ -318,6 +327,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 start_date=arguments.get("after"),
                 end_date=arguments.get("before"),
                 account_pk=int(account_pk) if account_pk is not None else None,
+                categories=list(categories) if categories else None,
                 limit=int(arguments.get("limit", 20))
             )
             return [TextContent(type="text", text=json.dumps(result, indent=2))]

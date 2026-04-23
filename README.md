@@ -9,6 +9,7 @@ MCP server for accessing Spark Desktop transcripts, emails, and calendar through
 - 📝 Access all meeting transcripts (calendar-based and ad-hoc)
 - ✉️ Browse and search emails across every Spark mailbox (SQLite FTS5)
 - 🏷️ Enumerate configured accounts and scope queries to a single mailbox
+- 🗂️ Filter by Spark smart-folder category (priority / notifications / newsletter / other)
 - 📅 Read calendar events
 - 📎 Inspect email attachments (with text extraction for PDF / DOCX / XLSX)
 - 🔍 Full-text search across transcripts and email bodies
@@ -81,7 +82,7 @@ All tools are read-only.
 - `list_accounts` — list every Spark account with its primary email address. Returns `accountPk`, `title`, `email`, `type`, `ownerFullName`; never returns passwords, tokens, keychain refs or server config.
 
 ### Emails
-- `list_emails` — browse `inbox` / `sent` / `drafts` / `all`. Filters: `sender`, `unread_only`, `after` / `before` (ISO datetime), `accountPk` (scope to a single mailbox). Pair `unread_only=true` + `after=<last-check>` to ingest "new mail since last time" across all configured mailboxes in one call.
+- `list_emails` — browse `inbox` / `sent` / `drafts` / `all`. Filters: `sender`, `unread_only`, `after` / `before` (ISO datetime), `accountPk` (scope to a single mailbox), `categories` (Spark smart-folder labels, see below). Pair `unread_only=true` + `after=<last-check>` to ingest "new mail since last time" across all configured mailboxes in one call. The return dict carries each email's `category` label so the caller can sort on it client-side.
 - `search_emails` — FTS5 search over email bodies, optional `sender`, date range, and `sort_by`
 - `get_email` — full email by `messagePk`; return dict includes `accountPk`, `accountTitle`, `accountEmail` so the caller can tell which mailbox the message belongs to
 - `find_action_items` — emails containing todos (last N days)
@@ -95,6 +96,22 @@ All tools are read-only.
 ### Combined intelligence
 - `get_daily_briefing` — today's summary across transcripts / emails / calendar
 - `find_context_for_meeting` — emails related to an event
+
+### Smart-folder categories
+
+Spark classifies every inbox message into one of the labels below (stored as an integer in `messages.category`). Pass any subset to `list_emails(categories=[...])`; unknown labels raise `ValueError`.
+
+| Label | Typical content |
+|---|---|
+| `priority` | Human-to-human correspondence (what Spark surfaces in "Priority") |
+| `notifications` | Service notifications (LinkedIn, Atlassian, Power BI digests, ...) |
+| `newsletter` | Marketing / updates with `List-Unsubscribe` headers |
+| `other` | Work mail that does not fit the other buckets |
+| `uncategorized` | Rare — Spark has not classified the message |
+
+**Caveat**: raw category counts in the DB are ~15% higher than what Spark shows in its sidebar. Spark applies additional UI-side filtering (muted conversations, folder visibility, internal bit flags) that we do not replicate. Use this filter for ingest workflows, not to match the UI counter exactly.
+
+`starred=1` is independent of category — it's the Spark *Contrassegnate* section. It ships in the return dict already.
 
 ### Attachments
 - `list_attachments` — attachments for a given email

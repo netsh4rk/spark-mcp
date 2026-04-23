@@ -91,6 +91,21 @@ class SparkDatabase:
         33: "IMAP",
     }
 
+    # Spark's smart-folder category for a message, inferred by inspecting
+    # real inboxes. ``messages.category`` holds the int at rest.
+    # The sidebar counts in the Spark UI are typically ~15% lower than the
+    # raw category counts here — Spark applies extra UI-side filtering that
+    # is not a single SQL predicate. Use this filter for ingest workflows
+    # ("skip newsletter + notifications"), not to match the UI counter.
+    _CATEGORY_LABELS = {
+        0: "uncategorized",
+        1: "priority",
+        2: "notifications",
+        3: "newsletter",
+        4: "other",
+    }
+    _CATEGORY_IDS = {v: k for k, v in _CATEGORY_LABELS.items()}
+
     @staticmethod
     def _extract_account_email(additional_info: Optional[str]) -> Optional[str]:
         """Pull only the primary email address out of a Spark account's
@@ -556,6 +571,7 @@ class SparkDatabase:
         end_date: Optional[str] = None,
         sender: Optional[str] = None,
         account_pk: Optional[int] = None,
+        categories: Optional[List[str]] = None,
         limit: int = 50,
         offset: int = 0
     ) -> Dict[str, Any]:
@@ -568,16 +584,33 @@ class SparkDatabase:
             end_date: Filter before this ISO date
             sender: Filter by sender email
             account_pk: Only emails from this Spark account (see list_accounts)
+            categories: Restrict to Spark smart-folder categories. Any subset
+                of ``priority`` / ``notifications`` / ``newsletter`` / ``other``
+                / ``uncategorized``. Unknown labels raise ``ValueError`` so the
+                caller notices typos instead of getting a silent empty result.
             limit: Maximum results
             offset: Pagination offset
 
         Returns:
-            Dict with 'emails' list and 'total' count
+            Dict with 'emails' list and 'total' count. Each email includes a
+            ``category`` label derived from ``messages.category``.
         """
         conn = self._connect_messages()
 
         where_clauses = []
         params = []
+
+        if categories:
+            try:
+                category_ids = [self._CATEGORY_IDS[c] for c in categories]
+            except KeyError as exc:
+                raise ValueError(
+                    f"Unknown category {exc.args[0]!r}. "
+                    f"Expected any of: {sorted(self._CATEGORY_IDS)}"
+                ) from None
+            placeholders = ",".join("?" * len(category_ids))
+            where_clauses.append(f"category IN ({placeholders})")
+            params.extend(category_ids)
 
         # Exclude transcripts
         where_clauses.append("(meta NOT LIKE '%mtid%' OR meta IS NULL)")
@@ -629,6 +662,7 @@ class SparkDatabase:
                 datetime(receivedDate, 'unixepoch') as receivedDate,
                 unseen,
                 starred,
+                category,
                 conversationPk,
                 numberOfFileAttachments
             FROM messages
@@ -657,6 +691,7 @@ class SparkDatabase:
                 'receivedDate': row['receivedDate'],
                 'unread': row['unseen'] == 1,
                 'starred': row['starred'] == 1,
+                'category': self._CATEGORY_LABELS.get(row['category'], f"other({row['category']})"),
                 'conversationPk': row['conversationPk'],
                 'hasAttachments': (row['numberOfFileAttachments'] or 0) > 0
             })
@@ -803,6 +838,7 @@ class SparkDatabase:
                 datetime(receivedDate, 'unixepoch') as receivedDate,
                 unseen,
                 starred,
+                category,
                 conversationPk,
                 numberOfFileAttachments,
                 inReplyTo,
@@ -840,6 +876,7 @@ class SparkDatabase:
             'receivedDate': row['receivedDate'],
             'unread': row['unseen'] == 1,
             'starred': row['starred'] == 1,
+            'category': self._CATEGORY_LABELS.get(row['category'], f"other({row['category']})"),
             'conversationPk': row['conversationPk'],
             'hasAttachments': (row['numberOfFileAttachments'] or 0) > 0,
             'inReplyTo': row['inReplyTo'],
