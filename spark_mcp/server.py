@@ -62,6 +62,18 @@ TOOLS: list[Tool] = [
         inputSchema={"type": "object", "properties": {}}
     ),
 
+    # ACCOUNT TOOLS
+    Tool(
+        name="list_accounts",
+        description="""List every email account configured in Spark with its primary address.
+
+Use this first when the user wants to ingest / summarise / filter emails by
+mailbox. Returned fields are safe: no passwords, tokens, or server config —
+only accountPk, title, email, type, ownerFullName. Pair the accountPk with
+list_emails(accountPk=...) to scope downstream queries to a single mailbox.""",
+        inputSchema={"type": "object", "properties": {}}
+    ),
+
     # EMAIL TOOLS
     Tool(
         name="list_emails",
@@ -71,13 +83,19 @@ WHEN TO USE THIS vs search_emails:
 - Use list_emails when looking for emails FROM a specific person (use sender filter)
 - Use list_emails when looking for recent correspondence
 - Use list_emails first to browse recent activity, then search_emails for specific content
+- Use unread_only=true + after=<ISO> to pull "new mail since <time>" across mailboxes.
+- Use accountPk (from list_accounts) to restrict to a single mailbox.
 
 This tool is more reliable than search_emails for finding threads by correspondent.""",
         inputSchema={
             "type": "object",
             "properties": {
-                "folder": {"type": "string", "description": "inbox/sent/all", "default": "inbox"},
+                "folder": {"type": "string", "description": "inbox/sent/drafts/all", "default": "inbox"},
                 "sender": {"type": "string", "description": "Filter by sender email or name (partial match)"},
+                "unread_only": {"type": "boolean", "description": "Only emails marked unread in Spark", "default": False},
+                "after": {"type": "string", "description": "ISO datetime (e.g. '2026-04-23T08:00:00'). Only emails received at/after this instant."},
+                "before": {"type": "string", "description": "ISO datetime. Only emails received at/before this instant."},
+                "accountPk": {"type": "number", "description": "Spark accountPk to restrict to a single mailbox (see list_accounts)"},
                 "limit": {"type": "number", "description": "Max results", "default": 20}
             }
         }
@@ -285,11 +303,21 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             result = db.get_statistics()
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
+        # ACCOUNT TOOLS
+        elif name == "list_accounts":
+            result = db.list_accounts()
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
         # EMAIL TOOLS
         elif name == "list_emails":
+            account_pk = arguments.get("accountPk")
             result = db.list_emails(
                 folder=arguments.get("folder", "inbox"),
                 sender=arguments.get("sender"),
+                unread_only=bool(arguments.get("unread_only", False)),
+                start_date=arguments.get("after"),
+                end_date=arguments.get("before"),
+                account_pk=int(account_pk) if account_pk is not None else None,
                 limit=int(arguments.get("limit", 20))
             )
             return [TextContent(type="text", text=json.dumps(result, indent=2))]

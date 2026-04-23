@@ -8,8 +8,33 @@ from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime
 
 
-SPARK_BASE = Path.home() / "Library/Containers/com.readdle.SparkDesktop.appstore/Data/Library/Application Support/Spark Desktop/core-data"
-SPARK_CACHE = Path.home() / "Library/Containers/com.readdle.SparkDesktop.appstore/Data/Library/Caches/Spark Desktop"
+# Spark Desktop ships in two flavours with different sandbox layouts:
+#   - Mac App Store build: ~/Library/Containers/com.readdle.SparkDesktop.appstore/Data/Library/...
+#   - Direct download from readdle.com: ~/Library/Application Support/Spark Desktop/...
+# We probe both, picking the first whose core-data/messages.sqlite exists.
+_HOME = Path.home()
+_SPARK_CANDIDATES = [
+    (
+        _HOME / "Library/Containers/com.readdle.SparkDesktop.appstore/Data/Library/Application Support/Spark Desktop/core-data",
+        _HOME / "Library/Containers/com.readdle.SparkDesktop.appstore/Data/Library/Caches/Spark Desktop",
+    ),
+    (
+        _HOME / "Library/Application Support/Spark Desktop/core-data",
+        _HOME / "Library/Caches/Spark Desktop",
+    ),
+]
+
+
+def _detect_spark_paths() -> Tuple[Path, Path]:
+    """Return (core_data_dir, cache_dir) for the installed Spark flavour."""
+    for base, cache in _SPARK_CANDIDATES:
+        if (base / "messages.sqlite").exists():
+            return base, cache
+    # Default to the App Store layout; __init__ will raise with a clear path
+    return _SPARK_CANDIDATES[0]
+
+
+SPARK_BASE, SPARK_CACHE = _detect_spark_paths()
 
 
 class SparkDatabase:
@@ -48,6 +73,95 @@ class SparkDatabase:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only = ON")
         return conn
+
+    # ============================================================================
+    # ACCOUNTS
+    # ============================================================================
+
+    # Best-effort mapping of Spark's numeric accountType to a human label.
+    # Derived from observed data on real Spark installs; unknown values fall
+    # back to a raw Other(<id>) so the caller can still tell accounts apart.
+    _ACCOUNT_TYPE_NAMES = {
+        0: "Gmail",
+        1: "iCloud",
+        2: "Exchange",
+        4: "Yahoo",
+        5: "Google Workspace",
+        30: "Spark Workspace",
+        33: "IMAP",
+    }
+
+    @staticmethod
+    def _extract_account_email(additional_info: Optional[str]) -> Optional[str]:
+        """Pull only the primary email address out of a Spark account's
+        ``additionalInfo`` JSON blob. Everything else in that blob (keychain
+        refs, SMTP/IMAP config, auth keys) is considered sensitive and is
+        never returned to callers.
+        """
+        if not additional_info:
+            return None
+        try:
+            data = json.loads(additional_info)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        value = data.get("accountAddress")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return None
+
+    def _account_index(self) -> Dict[int, Dict[str, Any]]:
+        """Cached map ``accountPk -> {title, email, type}`` for attaching
+        account context to email rows cheaply."""
+        if not hasattr(self, "_cached_account_index"):
+            conn = self._connect_messages()
+            cursor = conn.execute(
+                "SELECT pk, accountType, accountTitle, additionalInfo FROM accounts"
+            )
+            index = {}
+            for row in cursor.fetchall():
+                index[row["pk"]] = {
+                    "title": row["accountTitle"] or None,
+                    "email": self._extract_account_email(row["additionalInfo"]),
+                    "type": self._ACCOUNT_TYPE_NAMES.get(
+                        row["accountType"], f"Other({row['accountType']})"
+                    ),
+                }
+            conn.close()
+            self._cached_account_index = index
+        return self._cached_account_index
+
+    def list_accounts(self) -> Dict[str, Any]:
+        """List configured Spark accounts with their primary email address.
+
+        Returns:
+            ``{'accounts': [...], 'total': N}``. Each account is
+            ``{accountPk, title, email, type, ownerFullName}`` — no secrets,
+            no auth config, no server endpoints.
+        """
+        conn = self._connect_messages()
+        cursor = conn.execute(
+            """
+            SELECT pk, accountType, accountTitle, ownerFullName,
+                   additionalInfo, orderNumber
+            FROM accounts
+            ORDER BY orderNumber, pk
+            """
+        )
+        rows = cursor.fetchall()
+        conn.close()
+
+        accounts = []
+        for row in rows:
+            accounts.append({
+                "accountPk": row["pk"],
+                "title": row["accountTitle"] or None,
+                "email": self._extract_account_email(row["additionalInfo"]),
+                "type": self._ACCOUNT_TYPE_NAMES.get(
+                    row["accountType"], f"Other({row['accountType']})"
+                ),
+                "ownerFullName": row["ownerFullName"],
+            })
+        return {"accounts": accounts, "total": len(accounts)}
 
     def list_transcripts(
         self,
@@ -441,6 +555,7 @@ class SparkDatabase:
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         sender: Optional[str] = None,
+        account_pk: Optional[int] = None,
         limit: int = 50,
         offset: int = 0
     ) -> Dict[str, Any]:
@@ -452,6 +567,7 @@ class SparkDatabase:
             start_date: Filter after this ISO date
             end_date: Filter before this ISO date
             sender: Filter by sender email
+            account_pk: Only emails from this Spark account (see list_accounts)
             limit: Maximum results
             offset: Pagination offset
 
@@ -491,6 +607,10 @@ class SparkDatabase:
             where_clauses.append("messageFrom LIKE ?")
             params.append(f"%{sender}%")
 
+        if account_pk is not None:
+            where_clauses.append("accountPk = ?")
+            params.append(int(account_pk))
+
         where_clause = " AND ".join(where_clauses)
 
         # Get total count
@@ -502,6 +622,7 @@ class SparkDatabase:
         query = f"""
             SELECT
                 pk,
+                accountPk,
                 subject,
                 messageFrom as sender,
                 messageTo as recipients,
@@ -521,10 +642,15 @@ class SparkDatabase:
         rows = cursor.fetchall()
         conn.close()
 
+        accounts = self._account_index()
         emails = []
         for row in rows:
+            account = accounts.get(row['accountPk'], {})
             emails.append({
                 'messagePk': row['pk'],
+                'accountPk': row['accountPk'],
+                'accountTitle': account.get('title'),
+                'accountEmail': account.get('email'),
                 'subject': row['subject'] or '(No Subject)',
                 'sender': row['sender'] or 'Unknown',
                 'recipients': row['recipients'] or '',
@@ -668,6 +794,7 @@ class SparkDatabase:
         cursor = conn.execute("""
             SELECT
                 pk,
+                accountPk,
                 subject,
                 messageFrom as sender,
                 messageTo as recipients,
@@ -699,8 +826,12 @@ class SparkDatabase:
         fts_row = cursor.fetchone()
         search_conn.close()
 
+        account = self._account_index().get(row['accountPk'], {})
         return {
             'messagePk': row['pk'],
+            'accountPk': row['accountPk'],
+            'accountTitle': account.get('title'),
+            'accountEmail': account.get('email'),
             'subject': row['subject'] or '(No Subject)',
             'sender': row['sender'] or 'Unknown',
             'recipients': row['recipients'] or '',
