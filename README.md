@@ -111,7 +111,7 @@ Both are opened in `mode=ro` with `PRAGMA query_only = ON`. All queries are para
 This fork removes the PDF write surface, but two residual risks remain; know them before wiring this MCP into an agent:
 
 1. **Untrusted content in LLM context.** Emails, transcripts, subject lines and attachment filenames are attacker-controlled (anyone can send you an email). Do not auto-execute instructions that appear inside email bodies or attachment text. Keep the agent in a review-before-act posture for anything triggered by this data.
-2. **Attachment parsers.** `pypdf`, `python-docx`, `openpyxl` have had parsing CVEs in the past. Pin versions at install time and keep them updated. Prefer `get_attachment(extractText=false)` for attachments from unknown senders.
+2. **Attachment parsers.** `pypdf`, `python-docx`, `openpyxl` have had parsing CVEs in the past. Dependencies in `pyproject.toml` are **pinned exactly** (`==`) for this reason — a surprise upgrade could introduce a regression in parser safety without anyone noticing. Dependabot (`.github/dependabot.yml`) opens a weekly PR for each update so every version bump is reviewed before it lands. Prefer `get_attachment(extractText=false)` for attachments from unknown senders.
 
 Path-traversal hardening of `_get_attachment_path` in `database.py` is planned as a follow-up patch.
 
