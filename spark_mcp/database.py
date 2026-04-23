@@ -1,5 +1,6 @@
 """Database access layer for Spark SQLite databases."""
 
+import os
 import sqlite3
 import json
 from pathlib import Path
@@ -1302,29 +1303,52 @@ class SparkDatabase:
     def _get_attachment_path(self, message_pk: int, filename: str) -> Optional[Path]:
         """Get the filesystem path for an attachment.
 
+        Security: ``filename`` originates from the email's Content-Disposition
+        header and is therefore attacker-controlled. We collapse it to a bare
+        basename and verify the resolved path stays inside ``SPARK_CACHE`` so a
+        crafted name like ``../../etc/passwd`` cannot escape the cache root.
+
         Args:
             message_pk: Message primary key
-            filename: Attachment filename
+            filename: Attachment filename (untrusted)
 
         Returns:
-            Path object or None if cannot be determined
+            Path object or None if filename is invalid or escapes the cache root
         """
-        if not filename:
+        if not filename or "\x00" in filename:
+            return None
+
+        safe_name = os.path.basename(filename)
+        if not safe_name or safe_name in (".", ".."):
+            return None
+
+        try:
+            cache_root = SPARK_CACHE.resolve(strict=False)
+        except (OSError, RuntimeError):
             return None
 
         # Spark stores attachments in: Caches/Spark Desktop/messagesData/1/{messagePk}/{filename}
-        # The "1" appears to be an account ID, checking if the file exists
-        path = SPARK_CACHE / "messagesData" / "1" / str(message_pk) / filename
-        if path.exists():
-            return path
+        # The "1" appears to be an account ID; some layouts omit it.
+        candidates = [
+            SPARK_CACHE / "messagesData" / "1" / str(message_pk) / safe_name,
+            SPARK_CACHE / "messagesData" / str(message_pk) / safe_name,
+        ]
 
-        # Try without account ID subfolder
-        path = SPARK_CACHE / "messagesData" / str(message_pk) / filename
-        if path.exists():
-            return path
+        default: Optional[Path] = None
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve(strict=False)
+            except (OSError, RuntimeError):
+                continue
+            if not resolved.is_relative_to(cache_root):
+                continue
+            if default is None:
+                default = resolved
+            if resolved.exists():
+                return resolved
 
-        # Return the most likely path even if it doesn't exist yet
-        return SPARK_CACHE / "messagesData" / "1" / str(message_pk) / filename
+        # Return the most likely path even if the file isn't downloaded yet
+        return default
 
     # ============================================================================
     # COMBINED INTELLIGENCE
