@@ -8,6 +8,31 @@ from mcp.server import Server
 from mcp.types import Tool, TextContent
 from mcp.server.stdio import stdio_server
 from .database import SparkDatabase
+from .sanitizer import sanitize_response
+
+
+def _emit(result: Any) -> list[TextContent]:
+    """Render a tool result as a single TextContent after running it
+    through the prompt-injection sanitizer.
+
+    Every tool in this server reads content authored by external parties
+    (email senders, calendar invitees, attachment text). Routing every
+    response through ``sanitize_response`` ensures no tool can accidentally
+    bypass the injection defence — even if a new tool is added later and
+    the author forgets to sanitize.
+    """
+    envelope = sanitize_response(result)
+    return [TextContent(type="text", text=json.dumps(envelope, indent=2))]
+
+
+def _emit_error(message: str) -> list[TextContent]:
+    """Plain, non-sanitised error channel. Error strings are written by
+    this server (not by an external party) so they don't need the
+    untrusted-content envelope, and keeping them outside the envelope
+    makes them obvious at a glance to both the model and a human
+    reviewer reading logs.
+    """
+    return [TextContent(type="text", text=message)]
 
 
 # Initialize database (errors will be logged by MCP framework)
@@ -286,35 +311,35 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 end_date=arguments.get("before"),   # before maps to end_date
                 only_kept=True
             )
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            return _emit(result)
 
         elif name == "get_meeting_transcript":
             message_pk = arguments.get("messagePk")
             if not message_pk:
-                return [TextContent(type="text", text="Error: messagePk required")]
+                return _emit_error("Error: messagePk required")
             result = db.get_transcript(message_pk=int(message_pk))
             if result is None:
-                return [TextContent(type="text", text="Transcript not found")]
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+                return _emit_error("Transcript not found")
+            return _emit(result)
 
         elif name == "search_meeting_transcripts":
             query = arguments.get("query")
             if not query:
-                return [TextContent(type="text", text="Error: query required")]
+                return _emit_error("Error: query required")
             result = db.search_transcripts(
                 query=query,
                 limit=int(arguments.get("limit", 10))
             )
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            return _emit(result)
 
         elif name == "get_transcript_statistics":
             result = db.get_statistics()
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            return _emit(result)
 
         # ACCOUNT TOOLS
         elif name == "list_accounts":
             result = db.list_accounts()
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            return _emit(result)
 
         # EMAIL TOOLS
         elif name == "list_emails":
@@ -330,12 +355,12 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 categories=list(categories) if categories else None,
                 limit=int(arguments.get("limit", 20))
             )
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            return _emit(result)
 
         elif name == "search_emails":
             query = arguments.get("query")
             if not query:
-                return [TextContent(type="text", text="Error: query required")]
+                return _emit_error("Error: query required")
             result = db.search_emails(
                 query=query,
                 sender=arguments.get("sender"),
@@ -344,30 +369,30 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 sort_by=arguments.get("sort_by", "relevance"),
                 limit=int(arguments.get("limit", 10))
             )
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            return _emit(result)
 
         elif name == "get_email":
             message_pk = arguments.get("messagePk")
             if not message_pk:
-                return [TextContent(type="text", text="Error: messagePk required")]
+                return _emit_error("Error: messagePk required")
             result = db.get_email(int(message_pk))
             if result is None:
-                return [TextContent(type="text", text="Email not found")]
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+                return _emit_error("Email not found")
+            return _emit(result)
 
         elif name == "find_action_items":
             result = db.find_action_items(
                 days=int(arguments.get("days", 7)),
                 limit=int(arguments.get("limit", 20))
             )
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            return _emit(result)
 
         elif name == "find_pending_responses":
             result = db.find_pending_responses(
                 days=int(arguments.get("days", 7)),
                 limit=int(arguments.get("limit", 20))
             )
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            return _emit(result)
 
         # CALENDAR TOOLS
         elif name == "list_events":
@@ -375,59 +400,59 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 days_ahead=int(arguments.get("daysAhead", 1)),
                 limit=int(arguments.get("limit", 20))
             )
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            return _emit(result)
 
         elif name == "get_event_details":
             event_pk = arguments.get("eventPk")
             if not event_pk:
-                return [TextContent(type="text", text="Error: eventPk required")]
+                return _emit_error("Error: eventPk required")
             result = db.get_event_details(int(event_pk))
             if result is None:
-                return [TextContent(type="text", text="Event not found")]
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+                return _emit_error("Event not found")
+            return _emit(result)
 
         elif name == "find_events_needing_prep":
             result = db.find_events_needing_prep(
                 hours_ahead=int(arguments.get("hoursAhead", 24)),
                 limit=int(arguments.get("limit", 20))
             )
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            return _emit(result)
 
         # COMBINED INTELLIGENCE
         elif name == "get_daily_briefing":
             result = db.get_daily_briefing()
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            return _emit(result)
 
         elif name == "find_context_for_meeting":
             event_pk = arguments.get("eventPk")
             if not event_pk:
-                return [TextContent(type="text", text="Error: eventPk required")]
+                return _emit_error("Error: eventPk required")
             result = db.find_context_for_meeting(
                 event_pk=int(event_pk),
                 days_back=int(arguments.get("daysBack", 30))
             )
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            return _emit(result)
 
         # ATTACHMENT TOOLS
         elif name == "list_attachments":
             message_pk = arguments.get("messagePk")
             if not message_pk:
-                return [TextContent(type="text", text="Error: messagePk required")]
+                return _emit_error("Error: messagePk required")
             result = db.list_attachments(int(message_pk))
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            return _emit(result)
 
         elif name == "get_attachment":
             message_pk = arguments.get("messagePk")
             if not message_pk:
-                return [TextContent(type="text", text="Error: messagePk required")]
+                return _emit_error("Error: messagePk required")
             result = db.get_attachment(
                 message_pk=int(message_pk),
                 attachment_index=int(arguments.get("attachmentIndex", 0)),
                 extract_text=arguments.get("extractText", True)
             )
             if result is None:
-                return [TextContent(type="text", text="Attachment not found")]
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+                return _emit_error("Attachment not found")
+            return _emit(result)
 
         elif name == "search_attachments":
             result = db.search_attachments(
@@ -435,13 +460,13 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 mime_type=arguments.get("mimeType"),
                 limit=int(arguments.get("limit", 20))
             )
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            return _emit(result)
 
         else:
-            return [TextContent(type="text", text=f"Unknown tool: {name}")]
+            return _emit_error(f"Unknown tool: {name}")
 
     except Exception as e:
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        return _emit_error(f"Error: {str(e)}")
 
 
 async def main():

@@ -64,8 +64,8 @@ Restart Claude Desktop, and the tools will be available.
 
 ```bash
 python -m spark_mcp.server     # stdio MCP server
-python test_server.py          # smoke-test DB connection
-python verify_all_tools.py     # exercise each DB helper
+pip install -e '.[test]'       # install pytest
+pytest                         # run the security regression suite
 ```
 
 ## Available Tools
@@ -137,14 +137,15 @@ All three are opened in `mode=ro` with `PRAGMA query_only = ON`. Every query is 
 
 ## Security notes
 
-This fork removes the PDF write surface, but two residual risks remain; know them before wiring this MCP into an agent:
+This fork removes the PDF write surface and adds three layers of defence. Know them before wiring this MCP into an agent:
 
-1. **Untrusted content in LLM context.** Emails, transcripts, subject lines and attachment filenames are attacker-controlled (anyone can send you an email). Do not auto-execute instructions that appear inside email bodies or attachment text. Keep the agent in a review-before-act posture for anything triggered by this data.
+1. **Prompt-injection neutralisation.** Every tool response is routed through `spark_mcp.sanitizer.sanitize_response` before being handed to the client. That layer (a) strips invisible Unicode commonly used for smuggling instructions (zero-width chars, bidi overrides, BOM), (b) neutralises LLM control-token lookalikes (`<|system|>`, `[INST]`, `<function_calls>`, role tags, etc.) by replacing their delimiter characters with visually similar but inert Unicode, and (c) wraps every response with a top-level `_untrusted_content_notice` reminding the model that the payload is data, not instructions. This is defence in depth — it does not make the LLM immune to injection, but it closes the deterministic attack vectors. Covered by `tests/test_sanitizer.py`.
 2. **Attachment parsers.** `pypdf`, `python-docx`, `openpyxl` have had parsing CVEs in the past. Dependencies in `pyproject.toml` are **pinned exactly** (`==`) for this reason — a surprise upgrade could introduce a regression in parser safety without anyone noticing. Dependabot (`.github/dependabot.yml`) opens a weekly PR for each update so every version bump is reviewed before it lands. Prefer `get_attachment(extractText=false)` for attachments from unknown senders.
+3. **Agent posture.** Even with the sanitizer in place, keep the agent in a review-before-act posture for anything triggered by mail/transcript/calendar content. The sanitizer raises the bar; it does not remove the need for human judgement.
 
-Attachment filenames stored in Spark's DB are sender-controlled; `_get_attachment_path` collapses them to a basename and verifies the resolved path stays inside Spark's cache root before returning.
+Attachment filenames stored in Spark's DB are sender-controlled; `_get_attachment_path` collapses them to a basename and verifies the resolved path stays inside Spark's cache root before returning. Covered by `tests/test_path_traversal.py`, including a symlink-escape scenario.
 
-The `accounts` table Spark keeps also holds auth config (keychain refs, server endpoints, OAuth tokens). `list_accounts` parses **only** the primary email address out of `additionalInfo.accountAddress` and never returns any of the sensitive fields.
+The `accounts` table Spark keeps also holds auth config (keychain refs, server endpoints, OAuth tokens). `list_accounts` parses **only** the primary email address out of `additionalInfo.accountAddress` and never returns any of the sensitive fields. Covered by `tests/test_account_scrubbing.py`.
 
 ## Troubleshooting
 
@@ -160,11 +161,14 @@ Recent transcripts may still be syncing. Check `hasFullText` in list results.
 ## Development
 
 ```bash
-pip install -e .
-pytest   # if/when tests land
+pip install -e '.[test]'
+pytest
 ```
 
-See `PLAN.md` for the original upstream design notes.
+The suite locks in the three security invariants (path traversal, secret
+scrubbing, prompt-injection defence) plus parameter validation. It runs
+without a real Spark install: every fixture either bypasses
+`SparkDatabase.__init__` or points `SPARK_CACHE` at a temp directory.
 
 ## License
 
