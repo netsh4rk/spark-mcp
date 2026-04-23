@@ -1,3 +1,3 @@
 """Spark MCP Server - Access Spark Desktop transcripts, emails, and calendar via MCP (read-only)."""
 
-__version__ = "1.1.0"
+__version__ = "1.3.0"

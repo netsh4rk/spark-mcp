@@ -7,7 +7,8 @@ MCP server for accessing Spark Desktop transcripts, emails, and calendar through
 ## Features
 
 - 📝 Access all meeting transcripts (calendar-based and ad-hoc)
-- ✉️ Browse and search emails (SQLite FTS5)
+- ✉️ Browse and search emails across every Spark mailbox (SQLite FTS5)
+- 🏷️ Enumerate configured accounts and scope queries to a single mailbox
 - 📅 Read calendar events
 - 📎 Inspect email attachments (with text extraction for PDF / DOCX / XLSX)
 - 🔍 Full-text search across transcripts and email bodies
@@ -16,7 +17,7 @@ MCP server for accessing Spark Desktop transcripts, emails, and calendar through
 
 ## Requirements
 
-- macOS (Spark Desktop App Store version)
+- macOS with Spark Desktop installed — both the **Mac App Store** build and the **direct download from readdle.com** are supported; the server auto-detects the sandbox layout.
 - Python 3.10+
 
 ## Installation
@@ -76,10 +77,13 @@ All tools are read-only.
 - `search_meeting_transcripts` — FTS5 search over transcript text
 - `get_transcript_statistics` — totals, date range, top senders
 
+### Accounts
+- `list_accounts` — list every Spark account with its primary email address. Returns `accountPk`, `title`, `email`, `type`, `ownerFullName`; never returns passwords, tokens, keychain refs or server config.
+
 ### Emails
-- `list_emails` — browse `inbox` / `sent` / `all` with optional `sender` filter
+- `list_emails` — browse `inbox` / `sent` / `drafts` / `all`. Filters: `sender`, `unread_only`, `after` / `before` (ISO datetime), `accountPk` (scope to a single mailbox). Pair `unread_only=true` + `after=<last-check>` to ingest "new mail since last time" across all configured mailboxes in one call.
 - `search_emails` — FTS5 search over email bodies, optional `sender`, date range, and `sort_by`
-- `get_email` — full email by `messagePk`
+- `get_email` — full email by `messagePk`; return dict includes `accountPk`, `accountTitle`, `accountEmail` so the caller can tell which mailbox the message belongs to
 - `find_action_items` — emails containing todos (last N days)
 - `find_pending_responses` — emails likely needing a reply (last N days)
 
@@ -99,12 +103,20 @@ All tools are read-only.
 
 ## Data Sources
 
-1. **`messages.sqlite`** — message / transcript metadata
-   `~/Library/Containers/com.readdle.SparkDesktop.appstore/Data/Library/Application Support/Spark Desktop/core-data/messages.sqlite`
-2. **`search_fts5.sqlite`** — full-text index for transcripts and email bodies
-   `~/Library/Containers/com.readdle.SparkDesktop.appstore/Data/Library/Application Support/Spark Desktop/core-data/search_fts5.sqlite`
+The server probes two possible Spark sandbox layouts and uses the first whose `messages.sqlite` exists:
 
-Both are opened in `mode=ro` with `PRAGMA query_only = ON`. All queries are parameterised.
+- **Mac App Store build**
+  `~/Library/Containers/com.readdle.SparkDesktop.appstore/Data/Library/Application Support/Spark Desktop/core-data/`
+- **Direct download from readdle.com**
+  `~/Library/Application Support/Spark Desktop/core-data/`
+
+Under that root it reads:
+
+1. **`messages.sqlite`** — messages, transcripts metadata, accounts, conversations, attachments
+2. **`search_fts5.sqlite`** — full-text index for transcripts and email bodies
+3. **`calendarsapi.sqlite`** — calendar events
+
+All three are opened in `mode=ro` with `PRAGMA query_only = ON`. Every query is parameterised.
 
 ## Security notes
 
@@ -113,12 +125,14 @@ This fork removes the PDF write surface, but two residual risks remain; know the
 1. **Untrusted content in LLM context.** Emails, transcripts, subject lines and attachment filenames are attacker-controlled (anyone can send you an email). Do not auto-execute instructions that appear inside email bodies or attachment text. Keep the agent in a review-before-act posture for anything triggered by this data.
 2. **Attachment parsers.** `pypdf`, `python-docx`, `openpyxl` have had parsing CVEs in the past. Dependencies in `pyproject.toml` are **pinned exactly** (`==`) for this reason — a surprise upgrade could introduce a regression in parser safety without anyone noticing. Dependabot (`.github/dependabot.yml`) opens a weekly PR for each update so every version bump is reviewed before it lands. Prefer `get_attachment(extractText=false)` for attachments from unknown senders.
 
-Path-traversal hardening of `_get_attachment_path` in `database.py` is planned as a follow-up patch.
+Attachment filenames stored in Spark's DB are sender-controlled; `_get_attachment_path` collapses them to a basename and verifies the resolved path stays inside Spark's cache root before returning.
+
+The `accounts` table Spark keeps also holds auth config (keychain refs, server endpoints, OAuth tokens). `list_accounts` parses **only** the primary email address out of `additionalInfo.accountAddress` and never returns any of the sensitive fields.
 
 ## Troubleshooting
 
 **"Failed to connect to Spark databases"**
-Verify Spark Desktop (App Store build) is installed and the paths above exist.
+Verify Spark Desktop is installed and that `messages.sqlite` exists under one of the two layouts listed in **Data Sources**. Both the App Store and the direct-download flavours are supported.
 
 **No transcripts found**
 Check that transcripts are marked "kept" (not deleted). Run `get_transcript_statistics` to confirm counts.
