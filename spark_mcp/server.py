@@ -202,12 +202,34 @@ EXAMPLES:
     # CALENDAR TOOLS
     Tool(
         name="list_events",
-        description="List calendar events",
+        description=(
+            "List calendar events across all configured Spark calendars. "
+            "Each event is annotated with accountEmail (the owning Spark "
+            "calendar account) and calendarName (the specific calendar "
+            "within that account). Use accountEmail / calendarName to scope "
+            "to a single source — useful when the user asks about a specific "
+            "mailbox (e.g. 'meetings on my work calendar')."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
                 "daysAhead": {"type": "number", "description": "Days ahead", "default": 1},
-                "limit": {"type": "number", "description": "Max results", "default": 20}
+                "limit": {"type": "number", "description": "Max results", "default": 20},
+                "accountEmail": {
+                    "type": "string",
+                    "description": (
+                        "Restrict to events from this Spark calendar account "
+                        "(matches RDCALAPIAccount.identifier — typically the "
+                        "account email)."
+                    ),
+                },
+                "calendarName": {
+                    "type": "string",
+                    "description": (
+                        "Restrict to a single calendar within the chosen "
+                        "account (e.g. 'PMO', 'Holidays in Italy')."
+                    ),
+                },
             }
         }
     ),
@@ -224,12 +246,24 @@ EXAMPLES:
     ),
     Tool(
         name="find_events_needing_prep",
-        description="Find events needing preparation",
+        description=(
+            "Find upcoming events likely needing preparation (external "
+            "attendees, conference link, duration > 30min). Optionally "
+            "scoped to a single calendar account or named calendar."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
                 "hoursAhead": {"type": "number", "description": "Hours ahead", "default": 24},
-                "limit": {"type": "number", "description": "Max results", "default": 20}
+                "limit": {"type": "number", "description": "Max results", "default": 20},
+                "accountEmail": {
+                    "type": "string",
+                    "description": "Restrict to events from this Spark calendar account.",
+                },
+                "calendarName": {
+                    "type": "string",
+                    "description": "Restrict to a single calendar within the chosen account.",
+                },
             }
         }
     ),
@@ -396,9 +430,13 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
 
         # CALENDAR TOOLS
         elif name == "list_events":
+            account_email = arguments.get("accountEmail")
+            calendar_name = arguments.get("calendarName")
             result = db.list_events(
                 days_ahead=int(arguments.get("daysAhead", 1)),
-                limit=int(arguments.get("limit", 20))
+                limit=int(arguments.get("limit", 20)),
+                account_email=account_email if account_email else None,
+                calendar_name=calendar_name if calendar_name else None,
             )
             return _emit(result)
 
@@ -412,9 +450,13 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             return _emit(result)
 
         elif name == "find_events_needing_prep":
+            account_email = arguments.get("accountEmail")
+            calendar_name = arguments.get("calendarName")
             result = db.find_events_needing_prep(
                 hours_ahead=int(arguments.get("hoursAhead", 24)),
-                limit=int(arguments.get("limit", 20))
+                limit=int(arguments.get("limit", 20)),
+                account_email=account_email if account_email else None,
+                calendar_name=calendar_name if calendar_name else None,
             )
             return _emit(result)
 

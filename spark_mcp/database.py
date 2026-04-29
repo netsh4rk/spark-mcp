@@ -1047,18 +1047,34 @@ class SparkDatabase:
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         days_ahead: int = 1,
-        limit: int = 50
+        limit: int = 50,
+        account_email: Optional[str] = None,
+        calendar_name: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """List calendar events.
+        """List calendar events across all configured Spark calendars.
+
+        Each event is enriched with ``accountEmail`` (matches
+        ``RDCALAPIAccount.identifier``) and ``calendarName`` (matches
+        ``RDCALAPICollection.displayname``) so callers can tell which
+        mailbox/calendar an event belongs to. Use ``account_email`` /
+        ``calendar_name`` to scope the query to a single source.
 
         Args:
             start_date: Start date (ISO format, default: today)
             end_date: End date (ISO format, default: start + days_ahead)
             days_ahead: If no end_date, look this many days ahead
             limit: Maximum results
+            account_email: Restrict to events whose calendar belongs to this
+                Spark account (e.g. ``"luca.dapruzzo@xto-group.com"``). Note
+                this is the calendar account identifier, which uses email as
+                its natural key — distinct from ``accountPk`` in the messages
+                database.
+            calendar_name: Restrict to a single calendar within an account
+                (e.g. ``"PMO"``, ``"Holidays in Italy"``). One account can
+                expose several calendars.
 
         Returns:
-            Dict with 'events' list and 'total' count
+            Dict with 'events' list and 'total' count.
         """
         conn = self._connect_calendar()
 
@@ -1072,25 +1088,42 @@ class SparkDatabase:
         else:
             end_ts = int(datetime.fromisoformat(end_date).timestamp())
 
-        query = """
+        where_clauses = ["e.dstart >= ?", "e.dstart < ?"]
+        params: List[Any] = [start_ts, end_ts]
+
+        if account_email is not None:
+            where_clauses.append("a.identifier = ?")
+            params.append(account_email)
+        if calendar_name is not None:
+            where_clauses.append("c.displayname = ?")
+            params.append(calendar_name)
+
+        where_clause = " AND ".join(where_clauses)
+
+        query = f"""
             SELECT
-                pk,
-                summary,
-                descriptionProperty,
-                datetime(dstart, 'unixepoch', 'localtime') as startTime,
-                datetime(dend, 'unixepoch', 'localtime') as endTime,
-                location,
-                locationTitle,
-                allDay,
-                status,
-                conferenceInfo
-            FROM RDCALAPIEvent
-            WHERE dstart >= ? AND dstart < ?
-            ORDER BY dstart
+                e.pk,
+                e.summary,
+                e.descriptionProperty,
+                datetime(e.dstart, 'unixepoch', 'localtime') as startTime,
+                datetime(e.dend, 'unixepoch', 'localtime') as endTime,
+                e.location,
+                e.locationTitle,
+                e.allDay,
+                e.status,
+                e.conferenceInfo,
+                a.identifier as accountEmail,
+                c.displayname as calendarName
+            FROM RDCALAPIEvent e
+            LEFT JOIN RDCALAPICollection c ON c.pk = e.refCollectionPK
+            LEFT JOIN RDCALAPIAccount a ON a.pk = c.refAccountPK
+            WHERE {where_clause}
+            ORDER BY e.dstart
             LIMIT ?
         """
+        params.append(limit)
 
-        cursor = conn.execute(query, (start_ts, end_ts, limit))
+        cursor = conn.execute(query, params)
         rows = cursor.fetchall()
 
         events = []
@@ -1104,7 +1137,9 @@ class SparkDatabase:
                 'location': row['locationTitle'] or row['location'] or '',
                 'allDay': row['allDay'] == 1,
                 'status': row['status'],
-                'hasConferenceLink': bool(row['conferenceInfo'])
+                'hasConferenceLink': bool(row['conferenceInfo']),
+                'accountEmail': row['accountEmail'],
+                'calendarName': row['calendarName'],
             })
 
         conn.close()
@@ -1124,19 +1159,23 @@ class SparkDatabase:
         # Get event
         cursor = conn.execute("""
             SELECT
-                pk,
-                summary,
-                descriptionProperty,
-                datetime(dstart, 'unixepoch', 'localtime') as startTime,
-                datetime(dend, 'unixepoch', 'localtime') as endTime,
-                location,
-                locationTitle,
-                allDay,
-                status,
-                conferenceInfo,
-                url
-            FROM RDCALAPIEvent
-            WHERE pk = ?
+                e.pk,
+                e.summary,
+                e.descriptionProperty,
+                datetime(e.dstart, 'unixepoch', 'localtime') as startTime,
+                datetime(e.dend, 'unixepoch', 'localtime') as endTime,
+                e.location,
+                e.locationTitle,
+                e.allDay,
+                e.status,
+                e.conferenceInfo,
+                e.url,
+                a.identifier as accountEmail,
+                c.displayname as calendarName
+            FROM RDCALAPIEvent e
+            LEFT JOIN RDCALAPICollection c ON c.pk = e.refCollectionPK
+            LEFT JOIN RDCALAPIAccount a ON a.pk = c.refAccountPK
+            WHERE e.pk = ?
         """, (event_pk,))
 
         row = cursor.fetchone()
@@ -1188,6 +1227,8 @@ class SparkDatabase:
             'status': row['status'],
             'conferenceInfo': row['conferenceInfo'] or '',
             'url': row['url'] or '',
+            'accountEmail': row['accountEmail'],
+            'calendarName': row['calendarName'],
             'organizer': organizer,
             'attendees': attendees
         }
@@ -1195,7 +1236,9 @@ class SparkDatabase:
     def find_events_needing_prep(
         self,
         hours_ahead: int = 24,
-        limit: int = 20
+        limit: int = 20,
+        account_email: Optional[str] = None,
+        calendar_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Find upcoming events that may need preparation.
 
@@ -1207,34 +1250,53 @@ class SparkDatabase:
         Args:
             hours_ahead: Look this many hours ahead (default: 24)
             limit: Maximum results
+            account_email: Restrict to events from this Spark calendar account
+                (see ``list_events`` for available values).
+            calendar_name: Restrict to a single calendar within an account.
 
         Returns:
-            Dict with 'events' list needing preparation
+            Dict with 'events' list needing preparation. Each event includes
+            ``accountEmail`` and ``calendarName`` for source disambiguation.
         """
         conn = self._connect_calendar()
 
         now_ts = int(datetime.now().timestamp())
         end_ts = now_ts + (hours_ahead * 3600)
 
-        # Get events
-        query = """
+        where_clauses = ["e.dstart >= ?", "e.dstart < ?", "e.status != 3"]
+        params: List[Any] = [now_ts, end_ts]
+
+        if account_email is not None:
+            where_clauses.append("a.identifier = ?")
+            params.append(account_email)
+        if calendar_name is not None:
+            where_clauses.append("c.displayname = ?")
+            params.append(calendar_name)
+
+        where_clause = " AND ".join(where_clauses)
+
+        query = f"""
             SELECT
-                pk,
-                summary,
-                datetime(dstart, 'unixepoch', 'localtime') as startTime,
-                datetime(dend, 'unixepoch', 'localtime') as endTime,
-                location,
-                locationTitle,
-                conferenceInfo,
-                dend - dstart as duration
-            FROM RDCALAPIEvent
-            WHERE dstart >= ? AND dstart < ?
-                AND status != 3
-            ORDER BY dstart
+                e.pk,
+                e.summary,
+                datetime(e.dstart, 'unixepoch', 'localtime') as startTime,
+                datetime(e.dend, 'unixepoch', 'localtime') as endTime,
+                e.location,
+                e.locationTitle,
+                e.conferenceInfo,
+                e.dend - e.dstart as duration,
+                a.identifier as accountEmail,
+                c.displayname as calendarName
+            FROM RDCALAPIEvent e
+            LEFT JOIN RDCALAPICollection c ON c.pk = e.refCollectionPK
+            LEFT JOIN RDCALAPIAccount a ON a.pk = c.refAccountPK
+            WHERE {where_clause}
+            ORDER BY e.dstart
             LIMIT ?
         """
+        params.append(limit * 2)
 
-        cursor = conn.execute(query, (now_ts, end_ts, limit * 2))
+        cursor = conn.execute(query, params)
         rows = cursor.fetchall()
 
         events = []
@@ -1269,7 +1331,9 @@ class SparkDatabase:
                     'attendeeCount': attendee_count,
                     'hasConferenceLink': bool(row['conferenceInfo']),
                     'durationMinutes': (row['duration'] or 0) // 60,
-                    'hoursUntil': round(hours_until, 1)
+                    'hoursUntil': round(hours_until, 1),
+                    'accountEmail': row['accountEmail'],
+                    'calendarName': row['calendarName'],
                 })
 
         conn.close()
